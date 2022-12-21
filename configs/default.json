@@ -1,0 +1,79 @@
+{
+    "name": "default",
+    "n_gpu": 1,
+    "generator": {
+        "type": "Generator",
+        "args": {
+            "resblock_kernel_sizes": [3,5,7],
+            "resblock_dilation_sizes": [[1,2], [2,6], [3,12]],
+            "upsample_rates": [8,8,4],
+            "upsample_kernel_sizes": [16,16,8],
+            "upsample_initial_channel": 256
+        }
+    },
+    "mp_discriminator": {
+        "type": "MultiPeriodDiscriminator",
+        "args": {}
+    },
+    "ms_discriminator": {
+        "type": "MultiScaleDiscriminator",
+        "args": {}
+    },
+    "mel_spec": {
+        "type": "MelSpectrogram",
+        "args": {}
+    },
+    "dataset": {
+        "type": "LJSpeechDataset",
+        "args": {}
+    },
+    "dataloader": {
+        "type": "LJSpeechDataLoader",
+        "args":{
+            "batch_size": 16,
+            "shuffle": true,
+            "validation_split": 0.1,
+            "num_workers": 0
+        }
+    },
+    "generator_optimizer": {
+        "type": "AdamW",
+        "args":{
+            "lr": 0.0002,
+            "betas": [0.8, 0.99]
+        }
+    },
+    "discriminator_optimizer": {
+        "type": "AdamW",
+        "args": {
+            "lr": 0.0002,
+            "betas": [0.8, 0.99]
+        }
+    },
+    "generator_lr_scheduler": {
+        "type": "ExponentialLR",
+        "args": {
+            "gamma": 0.999,
+            "last_epoch": -1
+        }
+    },
+    "discriminator_lr_scheduler": {
+        "type": "ExponentialLR",
+        "args": {
+            "gamma": 0.999,
+            "last_epoch": -1
+        }
+    },
+    "trainer": {
+        "epochs": 100,
+
+        "save_dir": "saved/",
+        "save_period": 1,
+        "verbosity": 2,
+        "len_epoch": 100,
+        "log_step": 10,
+        
+        "monitor": "min val_loss",
+        "early_stop": 10
+    }
+}
