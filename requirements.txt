@@ -5,3 +5,4 @@ pandas
 wandb
 
 librosa
+torchaudio

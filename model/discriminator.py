@@ -9,11 +9,10 @@ class PeriodDiscriminator(torch.nn.Module):
     def __init__(self, period, n_channels=[1, 32, 128, 512, 1024]):
         super().__init__()
         self.period = period
-        self.convolutions = []
+        self.convolutions = nn.ModuleList()
         for i in range(len(n_channels) - 1):
             self.convolutions.append(weight_norm(Conv2d(n_channels[i], n_channels[i+1], (5, 1), (3, 1), padding=(2, 0))))
         self.convolutions.append(weight_norm(Conv2d(n_channels[-1], n_channels[-1], (5, 1), 1, padding=(2, 0))))
-        self.convolutions = nn.ModuleList(self.convolutions)
         self.post_convolution = weight_norm(Conv2d(n_channels[-1], 1, (3, 1), 1, padding=(1, 0)))
 
     def forward(self, x):

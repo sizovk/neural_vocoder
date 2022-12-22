@@ -36,10 +36,10 @@ class Trainer(BaseTrainer):
 
     def _loss_discriminator(self, true_sound, gen_sound):
         true_output, gen_output, _, _ = self.mp_discriminator(true_sound.unsqueeze(1), gen_sound.detach())
-        mp_loss = discriminator_loss(true_output, gen_output)[0]
+        mp_loss = discriminator_loss(true_output, gen_output)
 
         true_output, gen_output, _, _ = self.ms_discriminator(true_sound.unsqueeze(1), gen_sound.detach())
-        ms_loss = discriminator_loss(true_output, gen_output)[0]
+        ms_loss = discriminator_loss(true_output, gen_output)
 
         return mp_loss + ms_loss
 
@@ -50,11 +50,11 @@ class Trainer(BaseTrainer):
 
         true_output, gen_output, true_feature, gen_feature = self.mp_discriminator(true_sound.unsqueeze(1), gen_sound)
         mp_feature_loss = feature_loss(true_feature, gen_feature)
-        mp_gen_loss, _ = generator_loss(gen_output)
+        mp_gen_loss = generator_loss(gen_output)
 
         true_output, gen_output, true_feature, gen_feature = self.ms_discriminator(true_sound.unsqueeze(1), gen_sound)
         ms_feature_loss = feature_loss(true_feature, gen_feature)
-        ms_gen_loss, _ = generator_loss(gen_output)
+        ms_gen_loss = generator_loss(gen_output)
         
         return mel_loss + mp_feature_loss + mp_gen_loss + ms_feature_loss + ms_gen_loss
 
