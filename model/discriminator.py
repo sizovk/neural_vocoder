@@ -4,131 +4,106 @@ import torch.nn as nn
 from torch.nn import Conv1d, AvgPool1d, Conv2d
 from torch.nn.utils import weight_norm, spectral_norm
 
-LRELU_SLOPE = 0.1
 
-
-def get_padding(kernel_size, dilation=1):
-    return int((kernel_size*dilation - dilation)/2)
-
-
-class DiscriminatorP(torch.nn.Module):
-    def __init__(self, period, kernel_size=5, stride=3, use_spectral_norm=False):
-        super(DiscriminatorP, self).__init__()
+class PeriodDiscriminator(torch.nn.Module):
+    def __init__(self, period, n_channels=[1, 32, 128, 512, 1024]):
+        super().__init__()
         self.period = period
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
-        self.convs = nn.ModuleList([
-            norm_f(Conv2d(1, 32, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(32, 128, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(128, 512, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(512, 1024, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(1024, 1024, (kernel_size, 1), 1, padding=(2, 0))),
-        ])
-        self.conv_post = norm_f(Conv2d(1024, 1, (3, 1), 1, padding=(1, 0)))
+        self.convolutions = []
+        for i in range(len(n_channels) - 1):
+            self.convolutions.append(weight_norm(Conv2d(n_channels[i], n_channels[i+1], (5, 1), (3, 1), padding=(2, 0))))
+        self.convolutions.append(weight_norm(Conv2d(n_channels[-1], n_channels[-1], (5, 1), 1, padding=(2, 0))))
+        self.convolutions = nn.ModuleList(self.convolutions)
+        self.post_convolution = weight_norm(Conv2d(n_channels[-1], 1, (3, 1), 1, padding=(1, 0)))
 
     def forward(self, x):
-        fmap = []
+        features = []
 
-        # 1d to 2d
-        b, c, t = x.shape
-        if t % self.period != 0: # pad first
-            n_pad = self.period - (t % self.period)
-            x = F.pad(x, (0, n_pad), "reflect")
-            t = t + n_pad
-        x = x.view(b, c, t // self.period, self.period)
+        if x.shape[-1] % self.period != 0:
+            diff = self.period - (x.shape[-1] % self.period)
+            x = F.pad(x, (0, diff), "reflect")
 
-        for l in self.convs:
-            x = l(x)
-            x = F.leaky_relu(x, LRELU_SLOPE)
-            fmap.append(x)
-        x = self.conv_post(x)
-        fmap.append(x)
+        x = x.view(x.shape[0], x.shape[1], x.shape[2] // self.period, self.period)
+
+        for conv in self.convolutions:
+            x = F.leaky_relu(conv(x), 0.1)
+            features.append(x)
+        x = self.post_convolution(x)
+        features.append(x)
+        
         x = torch.flatten(x, 1, -1)
-
-        return x, fmap
+        return x, features
 
 
 class MultiPeriodDiscriminator(torch.nn.Module):
-    def __init__(self):
-        super(MultiPeriodDiscriminator, self).__init__()
-        self.discriminators = nn.ModuleList([
-            DiscriminatorP(2),
-            DiscriminatorP(3),
-            DiscriminatorP(5),
-            DiscriminatorP(7),
-            DiscriminatorP(11),
+    def __init__(self, periods=[2, 3, 5, 7, 11]):
+        super().__init__()
+        self.period_discriminators = nn.ModuleList([PeriodDiscriminator(period) for period in periods])
+
+    def forward(self, x, gen_x):
+        outputs = []
+        gen_outputs = []
+        features = []
+        gen_features = []
+        for period_discriminator in self.period_discriminators:
+            output, feature = period_discriminator(x)
+            gen_output, gen_feature = period_discriminator(x)
+            outputs.append(output)
+            gen_outputs.append(gen_output)
+            features.append(feature)
+            gen_features.append(gen_feature)
+
+        return outputs, gen_outputs, features, gen_features
+
+class ScaleDiscriminator(torch.nn.Module):
+    def __init__(self, norm_func=weight_norm):
+        super().__init__()
+        self.convolutions = nn.ModuleList([
+            norm_func(Conv1d(1, 128, 15, 1, padding=7)),
+            norm_func(Conv1d(128, 128, 41, 2, groups=4, padding=20)),
+            norm_func(Conv1d(128, 256, 41, 2, groups=16, padding=20)),
+            norm_func(Conv1d(256, 512, 41, 4, groups=16, padding=20)),
+            norm_func(Conv1d(512, 1024, 41, 4, groups=16, padding=20)),
+            norm_func(Conv1d(1024, 1024, 41, 1, groups=16, padding=20)),
+            norm_func(Conv1d(1024, 1024, 5, 1, padding=2)),
         ])
-
-    def forward(self, y, y_hat):
-        y_d_rs = []
-        y_d_gs = []
-        fmap_rs = []
-        fmap_gs = []
-        for i, d in enumerate(self.discriminators):
-            y_d_r, fmap_r = d(y)
-            y_d_g, fmap_g = d(y_hat)
-            y_d_rs.append(y_d_r)
-            fmap_rs.append(fmap_r)
-            y_d_gs.append(y_d_g)
-            fmap_gs.append(fmap_g)
-
-        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
-
-
-class DiscriminatorS(torch.nn.Module):
-    def __init__(self, use_spectral_norm=False):
-        super(DiscriminatorS, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
-        self.convs = nn.ModuleList([
-            norm_f(Conv1d(1, 128, 15, 1, padding=7)),
-            norm_f(Conv1d(128, 128, 41, 2, groups=4, padding=20)),
-            norm_f(Conv1d(128, 256, 41, 2, groups=16, padding=20)),
-            norm_f(Conv1d(256, 512, 41, 4, groups=16, padding=20)),
-            norm_f(Conv1d(512, 1024, 41, 4, groups=16, padding=20)),
-            norm_f(Conv1d(1024, 1024, 41, 1, groups=16, padding=20)),
-            norm_f(Conv1d(1024, 1024, 5, 1, padding=2)),
-        ])
-        self.conv_post = norm_f(Conv1d(1024, 1, 3, 1, padding=1))
+        self.post_convolution = norm_func(Conv1d(1024, 1, 3, 1, padding=1))
 
     def forward(self, x):
-        fmap = []
-        for l in self.convs:
-            x = l(x)
-            x = F.leaky_relu(x, LRELU_SLOPE)
-            fmap.append(x)
-        x = self.conv_post(x)
-        fmap.append(x)
+        features = []
+        for conv in self.convolutions:
+            x = F.leaky_relu(conv(x), 0.1)
+            features.append(x)
+        x = self.post_convolution(x)
+        features.append(x)
+        
         x = torch.flatten(x, 1, -1)
-
-        return x, fmap
+        return x, features
 
 
 class MultiScaleDiscriminator(torch.nn.Module):
     def __init__(self):
-        super(MultiScaleDiscriminator, self).__init__()
-        self.discriminators = nn.ModuleList([
-            DiscriminatorS(use_spectral_norm=True),
-            DiscriminatorS(),
-            DiscriminatorS(),
+        super().__init__()
+        self.scale_discriminators = nn.ModuleList([
+            ScaleDiscriminator(norm_func=spectral_norm),
+            ScaleDiscriminator(),
+            ScaleDiscriminator(),
         ])
-        self.meanpools = nn.ModuleList([
-            AvgPool1d(4, 2, padding=2),
-            AvgPool1d(4, 2, padding=2)
-        ])
+        self.avg_pool = AvgPool1d(4, 2, 2)
 
-    def forward(self, y, y_hat):
-        y_d_rs = []
-        y_d_gs = []
-        fmap_rs = []
-        fmap_gs = []
-        for i, d in enumerate(self.discriminators):
-            if i != 0:
-                y = self.meanpools[i-1](y)
-                y_hat = self.meanpools[i-1](y_hat)
-            y_d_r, fmap_r = d(y)
-            y_d_g, fmap_g = d(y_hat)
-            y_d_rs.append(y_d_r)
-            fmap_rs.append(fmap_r)
-            y_d_gs.append(y_d_g)
-            fmap_gs.append(fmap_g)
+    def forward(self, x, gen_x):
+        outputs = []
+        gen_outputs = []
+        features = []
+        gen_features = []
+        for scale_discriminator in self.scale_discriminators:
+            output, feature = scale_discriminator(x)
+            gen_output, gen_feature = scale_discriminator(gen_x)
+            outputs.append(output)
+            features.append(feature)
+            gen_outputs.append(gen_output)
+            gen_features.append(gen_feature)
+            x = self.avg_pool(x)
+            gen_x = self.avg_pool(gen_x)
 
-        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+        return outputs, gen_outputs, features, gen_features

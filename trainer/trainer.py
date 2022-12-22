@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from base import BaseTrainer
 from utils import inf_loop, MetricTracker
 from model import feature_loss, discriminator_loss, generator_loss
+from tqdm import tqdm
 
 
 class Trainer(BaseTrainer):
@@ -30,15 +31,15 @@ class Trainer(BaseTrainer):
         self.discriminator_lr_scheduler = discriminator_lr_scheduler
         self.mel_spec = mel_spec
 
-        self.train_metrics = MetricTracker('discriminator_loss', 'generator_loss', 'discriminator_grad_norm', 'generator_grad_norm')
+        self.train_metrics = MetricTracker('discriminator_loss', 'generator_loss', 'mp_discriminator_grad_norm', 'ms_discriminator_grad_norm', 'generator_grad_norm')
         self.valid_metrics = MetricTracker('discriminator_loss', 'generator_loss')
 
     def _loss_discriminator(self, true_sound, gen_sound):
         true_output, gen_output, _, _ = self.mp_discriminator(true_sound.unsqueeze(1), gen_sound.detach())
-        mp_loss = discriminator_loss(true_output, gen_output)
+        mp_loss = discriminator_loss(true_output, gen_output)[0]
 
         true_output, gen_output, _, _ = self.ms_discriminator(true_sound.unsqueeze(1), gen_sound.detach())
-        ms_loss = discriminator_loss(true_output, gen_output)
+        ms_loss = discriminator_loss(true_output, gen_output)[0]
 
         return mp_loss + ms_loss
 
@@ -47,15 +48,15 @@ class Trainer(BaseTrainer):
 
         mel_loss = F.l1_loss(true_melspec, gen_melspec) * 45
 
-        true_output, gen_output, true_feature, gen_feature = self.mp_discriminator(true_sound.unsqueeze(1), gen_sound.detach())
-        mp_loss = discriminator_loss(true_output, gen_output)
+        true_output, gen_output, true_feature, gen_feature = self.mp_discriminator(true_sound.unsqueeze(1), gen_sound)
         mp_feature_loss = feature_loss(true_feature, gen_feature)
+        mp_gen_loss, _ = generator_loss(gen_output)
 
-        true_output, gen_output, true_feature, gen_feature = self.ms_discriminator(true_sound.unsqueeze(1), gen_sound.detach())
-        ms_loss = discriminator_loss(true_output, gen_output)
+        true_output, gen_output, true_feature, gen_feature = self.ms_discriminator(true_sound.unsqueeze(1), gen_sound)
         ms_feature_loss = feature_loss(true_feature, gen_feature)
+        ms_gen_loss, _ = generator_loss(gen_output)
         
-        return mel_loss + mp_loss + mp_feature_loss + ms_loss + ms_feature_loss
+        return mel_loss + mp_feature_loss + mp_gen_loss + ms_feature_loss + ms_gen_loss
 
     def _train_epoch(self, epoch):
         """
@@ -68,7 +69,7 @@ class Trainer(BaseTrainer):
         self.mp_discriminator.train()
         self.ms_discriminator.train()
         self.train_metrics.reset()
-        for batch_idx, true_sound in enumerate(self.data_loader):
+        for batch_idx, true_sound in enumerate(tqdm(self.data_loader, position=0, leave=True)):
             true_sound = true_sound.to(self.device)
             true_melspec = self.mel_spec(true_sound)
             gen_sound = self.generator(true_melspec)
@@ -80,20 +81,21 @@ class Trainer(BaseTrainer):
             self.set_requires_grad(self.mp_discriminator, True)
             self.set_requires_grad(self.ms_discriminator, True)
             self.discriminator_optimizer.zero_grad()
-            discriminator_loss = self._loss_discriminator(true_sound, gen_sound)
-            discriminator_loss.backward()
+            disc_loss = self._loss_discriminator(true_sound, gen_sound)
+            disc_loss.backward()
             self.discriminator_optimizer.step()
 
             self.set_requires_grad(self.mp_discriminator, False)
             self.set_requires_grad(self.ms_discriminator, False)
             self.generator_optimizer.zero_grad()
-            generator_loss = self._loss_generator(true_sound, gen_sound, true_melspec)
-            generator_loss.backward()
+            gen_loss = self._loss_generator(true_sound, gen_sound, true_melspec)
+            gen_loss.backward()
             self.generator_optimizer.step()
 
-            self.train_metrics.update('discriminator_loss', discriminator_loss.item())
-            self.train_metrics.update('generator_loss', generator_loss.item())
-            self.train_metrics.update("discriminator_grad_norm", self.get_grad_norm(self.discriminator))
+            self.train_metrics.update('discriminator_loss', disc_loss.item())
+            self.train_metrics.update('generator_loss', gen_loss.item())
+            self.train_metrics.update("mp_discriminator_grad_norm", self.get_grad_norm(self.mp_discriminator))
+            self.train_metrics.update("ms_discriminator_grad_norm", self.get_grad_norm(self.ms_discriminator))
             self.train_metrics.update("generator_grad_norm", self.get_grad_norm(self.generator))
 
             if batch_idx % self.log_step == 0:
@@ -136,7 +138,7 @@ class Trainer(BaseTrainer):
         for i in [1, 2, 3]:
             wav, sr = librosa.load(f"val_samples/audio_{i}.wav")
             wav = torch.from_numpy(wav).to(self.device)
-            gen_audio = self.generator(self.mel_spec(wav)).squeeze()
+            gen_audio = self.generator(self.mel_spec(wav).unsqueeze(0)).squeeze()
             self.writer.add_audio(f"audio_{i}", gen_audio, sr)
 
     def _valid_epoch(self, epoch):
@@ -147,11 +149,12 @@ class Trainer(BaseTrainer):
         :return: A log that contains information about validation
         """
         self.generator.eval()
-        self.discriminator.eval()
+        self.mp_discriminator.eval()
+        self.ms_discriminator.eval()
         self.valid_metrics.reset()
         self._log_audio_examples()
         with torch.no_grad():
-            for true_sound in self.valid_data_loader:
+            for true_sound in tqdm(self.valid_data_loader, position=0, leave=True):
                 true_sound = true_sound.to(self.device)
                 true_melspec = self.mel_spec(true_sound)
                 gen_sound = self.generator(true_melspec)
@@ -160,11 +163,11 @@ class Trainer(BaseTrainer):
                     true_sound = F.pad(true_sound, (0, diff))
                     true_melspec = self.mel_spec(true_sound)
                 
-                discriminator_loss = self._loss_discriminator(true_sound, gen_sound)
-                generator_loss = self._loss_generator(true_sound, gen_sound, true_melspec)
+                disc_loss = self._loss_discriminator(true_sound, gen_sound)
+                gen_loss = self._loss_generator(true_sound, gen_sound, true_melspec)
 
-                self.valid_metrics.update('discriminator_loss', discriminator_loss.item())
-                self.valid_metrics.update('generator_loss', generator_loss.item())
+                self.valid_metrics.update('discriminator_loss', disc_loss.item())
+                self.valid_metrics.update('generator_loss', gen_loss.item())
     
         if self.writer is not None:
             self.writer.set_step(epoch * self.len_epoch, mode="val")
